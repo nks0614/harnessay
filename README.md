@@ -1,5 +1,7 @@
 # harnessay
 
+English | [한국어](README.ko.md)
+
 **Profiling and regression testing for your Claude Code workflow, built on the
 session transcripts you already have.**
 
