@@ -1,0 +1,11 @@
+{
+  "name": "harnessay",
+  "owner": { "name": "nks0614" },
+  "plugins": [
+    {
+      "name": "harnessay",
+      "source": "./",
+      "description": "Profile your Claude Code transcripts: context budget report, skill-promotion candidates, and a skill regression test harness."
+    }
+  ]
+}

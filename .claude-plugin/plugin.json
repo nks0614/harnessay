@@ -1,0 +1,6 @@
+{
+  "name": "harnessay",
+  "version": "0.1.0",
+  "description": "Profile your Claude Code transcripts: context budget report, skill-promotion candidates, and a skill regression test harness. Local-only, stdlib-only.",
+  "author": { "name": "nks0614" }
+}

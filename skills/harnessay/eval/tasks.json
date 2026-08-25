@@ -1,0 +1,15 @@
+[
+  {
+    "id": "sanity-echo",
+    "skill": null,
+    "prompt": "Reply with exactly PONG and nothing else.",
+    "check": { "type": "contains", "value": "PONG" },
+    "model": "claude-haiku-4-5"
+  },
+  {
+    "id": "harnessay-report",
+    "skill": "harnessay",
+    "prompt": "/harnessay",
+    "check": { "type": "regex", "value": "(re-reads|report\\.html|context)" }
+  }
+]
