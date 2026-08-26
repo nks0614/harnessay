@@ -15,15 +15,17 @@ def main():
     with tempfile.TemporaryDirectory() as d:
         os.makedirs(os.path.join(d, "proj-a"))
         with open(os.path.join(d, "proj-a", "s1.jsonl"), "w") as f:
-            # Read 같은 파일 2회 (각 400B), Bash 1회 (100B), 사이드체인 usage, compaction
-            for i, tid in enumerate(["t1", "t2"]):
+            # Read 4회: 동일 내용 재읽기 1회(t2)만 낭비. 다른 범위(t3)·바뀐 내용(t4)은 아님
+            reads = [("t1", {}, "x" * 400), ("t2", {}, "x" * 400),
+                     ("t3", {"offset": 10}, "x" * 400), ("t4", {}, "z" * 400)]
+            for tid, extra, body in reads:
                 f.write(line({"type": "assistant", "message": {
                     "usage": {"output_tokens": 10, "cache_creation_input_tokens": 5,
                               "cache_read_input_tokens": 2},
                     "content": [{"type": "tool_use", "id": tid, "name": "Read",
-                                 "input": {"file_path": "/a.py"}}]}}))
+                                 "input": {"file_path": "/a.py", **extra}}]}}))
                 f.write(line({"type": "user", "message": {"content": [
-                    {"type": "tool_result", "tool_use_id": tid, "content": "x" * 400}]}}))
+                    {"type": "tool_result", "tool_use_id": tid, "content": body}]}}))
             f.write(line({"type": "assistant", "message": {
                 "usage": {"output_tokens": 3, "cache_creation_input_tokens": 0,
                           "cache_read_input_tokens": 0},
@@ -39,16 +41,16 @@ def main():
             f.write("not json\n")  # 깨진 라인 무시 확인
 
         st = aggregate(d)
-        assert st["totals"]["output"] == 23
+        assert st["totals"]["output"] == 43
         assert st["totals"]["sidechain_output"] == 7
         assert st["totals"]["compactions"] == 1
-        assert st["tools"]["Read"] == {"calls": 2, "bytes": 800}
+        assert st["tools"]["Read"] == {"calls": 4, "bytes": 1600}
         assert st["tools"]["Bash"] == {"calls": 1, "bytes": 100}
-        assert st["reads"][("proj-a", "/a.py")] == 2
-        assert st["read_bytes"][("proj-a", "/a.py")] == 800
+        assert st["reads"][("proj-a", "/a.py")] == 4
+        assert st["redundant"][("proj-a", "/a.py")] == 400  # t2만 unchanged re-read
         h = headline(st)
-        assert "Read" in h and "88%" in h, h      # 800/900
-        assert "50%" in h, h                      # 재읽기 낭비 400/800
+        assert "Read" in h and "94%" in h, h      # 1600/1700
+        assert "25.0%" in h, h                    # 재읽기 낭비 400/1600
         assert "proj-a" in render(st)
 
         # 스킬 후보: 같은 2-gram이 3개 프로젝트에서 반복 → personal
@@ -72,7 +74,7 @@ def main():
                               "cache_read_input_tokens": 0}, "content": []}}))
         # s2의 1월 라인(100)만 걸러지고, timestamp 없는 s1 라인(23)은 포함
         st2 = aggregate(d, since="2026-03-01")
-        assert st2["totals"]["output"] == 24, st2["totals"]
+        assert st2["totals"]["output"] == 44, st2["totals"]
     print("ok")
 
 

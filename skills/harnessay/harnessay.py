@@ -6,6 +6,7 @@
 """
 import argparse
 import glob
+import hashlib
 import html
 import json
 import os
@@ -16,12 +17,12 @@ SCHEMA_VERSION = "2026-08-cc"  # 파싱 기준이 된 Claude Code 트랜스크�
 
 # ---------- 파싱 계층 ----------
 
-def _content_size(content):
+def _content_text(content):
     if isinstance(content, str):
-        return len(content)
+        return content
     if isinstance(content, list):
-        return sum(len(b.get("text", "")) for b in content if isinstance(b, dict))
-    return 0
+        return "".join(b.get("text", "") for b in content if isinstance(b, dict))
+    return ""
 
 
 def parse_session(path, since=None):
@@ -59,6 +60,8 @@ def parse_session(path, since=None):
                         "kind": "tool_use",
                         "name": c.get("name", "?"),
                         "file_path": inp.get("file_path"),
+                        "offset": inp.get("offset"),
+                        "limit": inp.get("limit"),
                         "cmd": cmd.split()[0] if isinstance(cmd, str) and cmd.split() else None,
                         "sidechain": bool(o.get("isSidechain")),
                     })
@@ -67,10 +70,14 @@ def parse_session(path, since=None):
             if isinstance(content, list):
                 for b in content:
                     if isinstance(b, dict) and b.get("type") == "tool_result":
+                        name = tool_names.get(b.get("tool_use_id"), "?")
+                        text = _content_text(b.get("content"))
                         events.append({
                             "kind": "tool_result",
-                            "name": tool_names.get(b.get("tool_use_id"), "?"),
-                            "size": _content_size(b.get("content")),
+                            "name": name,
+                            "size": len(text),
+                            "hash": hashlib.md5(text.encode()).hexdigest()
+                            if name == "Read" else None,
                         })
         elif t == "system" and o.get("subtype") == "compact_boundary":
             events.append({"kind": "compact"})
@@ -85,18 +92,20 @@ def aggregate(projects_dir, since=None):
         "since": since,
         "projects": defaultdict(lambda: Counter()),  # project -> counters
         "tools": defaultdict(lambda: Counter()),     # tool -> {calls, bytes}
-        "reads": Counter(),                          # (project, file) -> count
-        "read_bytes": Counter(),                     # (project, file) -> bytes
+        "reads": Counter(),                          # (project, file) -> Read 횟수
+        "redundant": Counter(),                      # (project, file) -> 동일 내용 재읽기 bytes
         "totals": Counter(),
         "seqs": [],                                  # (project, [tool token,...]) 세션별
     }
-    pending_reads = []  # Read tool_use 순서대로 결과 크기를 귀속
     for f in sorted(glob.glob(os.path.join(projects_dir, "*", "*.jsonl"))):
         project = os.path.basename(os.path.dirname(f))
         p = st["projects"][project]
         p["sessions"] += 1
         seq = []
         st["seqs"].append((project, seq))
+        # 세션(=컨텍스트 윈도우) 단위로 판정: 새 세션의 재읽기는 낭비가 아니다
+        pending_reads = []  # Read tool_use 순서대로 결과를 귀속
+        last_hash = {}      # (file, offset, limit) -> 직전 결과 hash
         for e in parse_session(f, since):
             k = e["kind"]
             if k == "usage":
@@ -112,12 +121,18 @@ def aggregate(projects_dir, since=None):
                 seq.append(e["name"] + (":" + e["cmd"] if e.get("cmd") else ""))
                 if e["name"] == "Read" and e["file_path"]:
                     st["reads"][(project, e["file_path"])] += 1
-                    pending_reads.append((project, e["file_path"]))
+                    pending_reads.append(
+                        (e["file_path"], e["offset"], e["limit"]))
             elif k == "tool_result":
                 st["tools"][e["name"]]["bytes"] += e["size"]
                 st["totals"]["result_bytes"] += e["size"]
                 if e["name"] == "Read" and pending_reads:
-                    st["read_bytes"][pending_reads.pop(0)] += e["size"]
+                    key = pending_reads.pop(0)
+                    # 같은 파일·같은 범위·같은 내용이 다시 들어왔을 때만 낭비
+                    if last_hash.get(key) == e["hash"]:
+                        st["redundant"][(project, key[0])] += e["size"]
+                        st["totals"]["redundant_bytes"] += e["size"]
+                    last_hash[key] = e["hash"]
             elif k == "compact":
                 p["compactions"] += 1
                 st["totals"]["compactions"] += 1
@@ -165,13 +180,11 @@ def headline(st):
     if not total:
         return "No data."
     top, c = max(st["tools"].items(), key=lambda kv: kv[1]["bytes"])
-    dup_bytes = sum(st["read_bytes"][k] - st["read_bytes"][k] // st["reads"][k]
-                    for k in st["reads"] if st["reads"][k] > 1)
     read_bytes = st["tools"].get("Read", Counter())["bytes"]
     s = f"{c['bytes'] * 100 // total}% of tool-result context is {top}."
     if read_bytes:
-        s += (f" {dup_bytes * 100 // read_bytes}% of Read bytes are"
-              " same-file re-reads.")
+        s += (f" {st['totals']['redundant_bytes'] * 100 / read_bytes:.1f}% of"
+              " Read bytes re-read unchanged content.")
     return s
 
 
@@ -197,11 +210,13 @@ def render(st):
         f"<td>{fmt(c['sidechain_output'])}</td><td>{fmt(c['cache_creation'])}</td>"
         f"<td>{fmt(c['tool_calls'])}</td><td>{c['compactions']}</td></tr>"
         for p, c in sorted(st["projects"].items(), key=lambda kv: -kv[1]["output"]))
-    dups = [(k, n) for k, n in st["reads"].most_common(20) if n > 1]
     rows_d = "".join(
-        f"<tr><td>{e(proj)}</td><td>{e(fp)}</td><td>{n}</td>"
-        f"<td>{fmt(st['read_bytes'][(proj, fp)] - st['read_bytes'][(proj, fp)] // n)}</td></tr>"
-        for (proj, fp), n in dups)
+        f"<tr><td>{e(proj)}</td><td>{e(fp)}</td><td>{st['reads'][(proj, fp)]}</td>"
+        f"<td>{fmt(b)}</td></tr>"
+        for (proj, fp), b in st["redundant"].most_common(20))
+    rows_m = "".join(
+        f"<tr><td>{e(proj)}</td><td>{e(fp)}</td><td>{n}</td></tr>"
+        for (proj, fp), n in st["reads"].most_common(15) if n >= 5)
     rows_c = "".join(
         f"<tr><td><code>{e(' → '.join(c['gram']))}</code></td><td>{c['count']}</td>"
         f"<td>{len(c['projects'])}</td><td>{c['scope']}</td></tr>"
@@ -221,8 +236,15 @@ tool results {fmt(T['result_bytes'])} B · {T['compactions']} compactions</p>
 <table><tr><th>tool</th><th>calls</th><th>result bytes</th><th>~tokens</th><th>share</th></tr>{rows_t}</table>
 <h2>By project</h2>
 <table><tr><th>project</th><th>sessions</th><th>output tok</th><th>sidechain tok</th><th>cache write</th><th>tool calls</th><th>compactions</th></tr>{rows_p}</table>
-<h2>Top 20 duplicate reads</h2>
-<table><tr><th>project</th><th>file</th><th>count</th><th>wasted bytes</th></tr>{rows_d}</table>
+<h2>Unchanged re-reads (waste)</h2>
+<p>Only counted when the same file, same range came back with identical
+content within one session — a re-read after an edit is not waste.</p>
+<table><tr><th>project</th><th>file</th><th>reads</th><th>re-read bytes</th></tr>{rows_d}</table>
+<h2>Most-read files (CLAUDE.md candidates)</h2>
+<p>Files Claude keeps reading across sessions. Not waste — each session starts
+cold — but a summary in that project's CLAUDE.md could make the read
+unnecessary.</p>
+<table><tr><th>project</th><th>file</th><th>reads</th></tr>{rows_m}</table>
 <h2>Skill candidates (repeated tool sequences)</h2>
 <p>Sequences repeated 3+ times. Shared across 3+ projects → <code>personal</code>
 (~/.claude/skills), otherwise <code>project</code> (.claude/skills). Promotion is manual.</p>

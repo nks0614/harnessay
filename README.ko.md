@@ -2,129 +2,133 @@
 
 [English](README.md) | 한국어
 
-**이미 쌓여 있는 세션 트랜스크립트로 Claude Code 워크플로를 프로파일링하고 회귀
-테스트하는 도구.**
+**Claude Code가 컨텍스트를 어디에 낭비하는지 찾아준다.**
 
-Claude Code는 모든 세션의 전체 트랜스크립트를
-`~/.claude/projects/*/*.jsonl`에 기록합니다 — 토큰 사용량, 모든 툴 호출, 모든
-툴 결과까지. 그런데 아무도 읽지 않죠. harnessay는 그 방치된 데이터를 세 가지
-도구로 바꿉니다:
+harnessay는 이미 로컬에 쌓여 있는 Claude Code 트랜스크립트
+(`~/.claude/projects/*/*.jsonl`)를 분석해 컨텍스트 낭비, 스킬로 만들 가치가
+있는 반복 워크플로, 그리고 스킬 수정 후의 회귀를 찾아냅니다.
 
-| 도구 | 답하는 질문 |
-|---|---|
-| 컨텍스트 예산 프로파일러 | 내 토큰은 실제로 어디에 쓰이는가? |
-| 스킬 승격 탐지기 | 반복되는 워크플로 중 뭘 스킬로 만들 가치가 있는가? |
-| 스킬 회귀 테스트 하네스 | 스킬을 고친 뒤에도 여전히 잘 동작하는가? |
+훅 없음. API 키 없음. 아무것도 머신 밖으로 나가지 않음.
 
-전부 Python 표준 라이브러리만으로 로컬에서 동작합니다. API 키 불필요 — 회귀
-하네스는 기존 Claude 구독으로 `claude -p`를 실행합니다.
+![리포트 예시](docs/report-example.png)
 
-## 설치
+## 내 기록에서 실제로 찾아낸 것
 
-**Claude Code 플러그인으로** (권장):
+22개 세션, 10개 프로젝트, 툴 결과 3.9 MB를 분석한 실제 결과:
+
+- **툴 결과 컨텍스트의 53%가 Bash 출력** — 단일 최대 소비원으로, 모든 파일
+  읽기를 합친 것의 두 배.
+- **Read 바이트 중 진짜 낭비는 0.2%뿐.** 재읽기 낭비가 클 거라 예상했지만,
+  정확히 측정하니(같은 파일·같은 범위·동일 내용·한 세션 안) Claude Code의
+  재읽기는 거의 전부 정당했습니다 — 진짜 문제는 다른 곳에 있었던 거죠.
+- **3개 이상 프로젝트에서 반복된 워크플로 10개**, 최다는 152회 — 스킬로
+  만들었어야 할 브라우저 자동화 체인이었습니다.
+
+여러분의 숫자는 다를 겁니다. 그게 핵심이에요 — 직접 돌려보세요.
+
+## Quick start
 
 ```
 /plugin marketplace add nks0614/harnessay
 /plugin install harnessay@harnessay
+/harnessay
 ```
 
-**독립 개인 스킬로:**
+플러그인 없이 단독 실행:
 
 ```bash
 git clone https://github.com/nks0614/harnessay.git
-ln -s "$(pwd)/harnessay/skills/harnessay" ~/.claude/skills/harnessay
+python3 harnessay/skills/harnessay/harnessay.py -o report.html
 ```
 
 요구사항: Claude Code, Python 3.8+. 서드파티 패키지 없음.
 
-## 사용법
+## 루프
 
-아무 Claude Code 세션에서:
+harnessay는 기능 세 개의 묶음이 아니라, 사용 기록 위에서 도는 하나의 최적화
+루프입니다:
 
 ```
-/harnessay          # 컨텍스트 예산 리포트 + 스킬 후보
-/harnessay eval     # 골든 태스크 실행, 통과율 보고
+Observe   →  내 컨텍스트는 실제로 어디로 가는가?
+Detect    →  어떤 낭비와 반복이 있는가?
+Promote   →  어떤 반복 워크플로를 스킬/CLAUDE.md로 만들 것인가?
+Verify    →  그 변경이 실제로 도움이 됐는가?
 ```
 
-스크립트 직접 실행도 가능:
+### Observe — 컨텍스트 예산 리포트
 
-```bash
-python3 skills/harnessay/harnessay.py -o report.html
-python3 skills/harnessay/evalrun.py [tasks.json] [--only id부분문자열]
+`/harnessay`(또는 `harnessay.py`)가 모든 트랜스크립트를 파싱해 툴별 컨텍스트
+소비, 프로젝트별 합계, compaction, 그리고 한 문장 헤드라인을 출력합니다:
+
+> 53% of tool-result context is Bash. 0.2% of Read bytes re-read unchanged
+> content.
+
+습관을 바꾼 뒤에는 `--since YYYY-MM-DD`로 기간을 좁혀 재측정하세요.
+
+### Detect — 낭비와 반복
+
+- **Unchanged re-reads**: 같은 파일·같은 범위가 동일한 내용으로 한 세션 안에서
+  다시 들어온 경우만 셉니다. 편집 후 재읽기는 낭비가 아니므로 세지 않습니다.
+- **Most-read files**: 세션마다 반복해서 읽히는 파일. 읽기 하나하나는
+  정당하지만, 해당 프로젝트 CLAUDE.md에 요약을 넣으면 읽을 필요가 없어집니다.
+- **반복 툴 시퀀스**: 세션별 툴 호출의 n-gram(Bash는 명령 첫 단어로 구분),
+  범용 편집 루프(`Read → Edit`)는 필터링.
+
+### Promote — 스킬 후보
+
+3회 이상 반복된 시퀀스를 후보로 제안합니다: 3개 이상 프로젝트 공통 →
+**personal** 스킬(`~/.claude/skills`), 한 프로젝트 한정 → **project**
+스킬(`.claude/skills`). harnessay는 스킬을 생성하지 않습니다 — 증거를
+제시하고, 결정은 사람이 합니다.
+
+### Verify — 스킬 회귀 테스트 하네스
+
+스킬별 골든 태스크를 기존 구독으로 `claude -p` 배치 실행하고, 통과율을
+`results.jsonl`에 누적합니다:
+
 ```
-
-## 컨텍스트 예산 프로파일러
-
-모든 트랜스크립트를 파싱해 집계합니다:
-
-- **툴별 컨텍스트 소비** — 각 툴의 결과가 컨텍스트 윈도우에 넣은 바이트
-  (Read, Bash, Grep, MCP 툴, …)
-- **중복 읽기** — 반복해서 읽힌 파일과 재읽기로 낭비된 바이트
-- **프로젝트별 합계** — 출력 토큰, 사이드체인(서브에이전트) 토큰, 캐시 쓰기,
-  compaction 횟수
-
-리포트는 행동으로 이어지는 한 문장으로 시작합니다. 예:
-
-> 52% of tool-result context is Bash. 31% of Read bytes are same-file
-> re-reads.
-
-이 문장이 핵심입니다: 대시보드를 뒤지지 않아도 뭘 고칠지 알려줍니다 (자주
-재읽는 파일의 요약을 `CLAUDE.md`에 넣기, 시끄러운 Bash 출력 줄이기).
-
-## 스킬 승격 탐지기
-
-같은 파싱 과정에서 세션별 툴 호출 시퀀스를 추출하고(Bash는 `Bash:git`처럼 명령
-첫 단어로 구분), 3회 이상 반복된 n-gram을 보여줍니다:
-
-- **3개 이상 프로젝트** 공통 → **personal** 스킬 제안 (`~/.claude/skills`)
-- **한 프로젝트**에 한정 → **project** 스킬 제안 (`.claude/skills`)
-
-탐지기는 증거만 제시합니다. 스킬을 자동 생성하지 않습니다 — 일회성 워크플로가
-자동으로 승격되면 노이즈가 되므로, 승격은 항상 사람이 결정합니다.
-
-## 스킬 회귀 테스트 하네스
-
-스킬용 CI입니다. 골든 태스크를 정의하고 `claude -p`로 배치 실행한 뒤, 통과율을
-`results.jsonl`에 시간순으로 누적합니다.
+/harnessay eval
+```
 
 ```json
-[
-  {
-    "id": "my-skill-smoke",
-    "skill": "my-skill",
-    "prompt": "/my-skill 늘 하던 그 작업",
-    "check": { "type": "regex", "value": "기대하는 출력 패턴" },
-    "model": "claude-haiku-4-5"
-  }
-]
+{
+  "id": "my-skill-smoke",
+  "skill": "my-skill",
+  "prompt": "/my-skill 늘 하던 그 작업",
+  "check": { "type": "regex", "value": "기대하는 출력 패턴" },
+  "model": "claude-haiku-4-5"
+}
 ```
 
-- `check.type`은 `contains` 또는 `regex`, 세션의 최종 출력에 적용됩니다.
-- `model`은 선택 — 가벼운 sanity 태스크에는 작은 모델을 쓰세요.
-- 실행마다 `{ts, id, skill, pass, duration}`이 tasks 파일 옆 `results.jsonl`에
-  추가되어, 회귀는 통과율 하락으로 드러납니다.
-- 골든 태스크 초안은 프로파일러의 스킬 후보 시퀀스에서 뽑으세요 — 정의상 가장
-  많이 반복하는 워크플로입니다.
+태스크마다 구독 사용량이 차감됩니다 — 스킬당 1~2개로 작게 유지하세요. 체크는
+출력 기반(`contains`/`regex`)입니다. 저장소 상태·테스트 exit code 검증은
+로드맵에 있으며, 현재의 PASS는 "스킬이 실행되고 올바르게 답했다"이지 "저장소가
+멀쩡함이 보장된다"가 아닙니다.
 
-참고: 태스크 실행마다 Claude 구독 사용량이 차감됩니다. 골든 스위트는 스킬당
-1~2개로 작게 유지하세요.
+## 뭐가 다른가?
+
+사용량 트래커(ccusage, `/usage`)는 **얼마나** 썼는지 알려주고, 트레이스 뷰어는
+**한 번의 실행**을 들여다보게 해주고, 스킬 생성기는 스킬을 **대신** 써줍니다.
+harnessay는 그 사이의 루프를 맡습니다: 누적된 기록을 관찰하고, 낭비와 반복을
+찾고, 재사용 가능한 지시로 승격하고, 그게 실제로 도움이 됐는지 측정합니다.
+프로젝트 교차 시각이 차별점입니다 — 여러 리포를 굴려야만 드러나는 패턴은
+단일 세션 도구에는 보이지 않습니다.
 
 ## 프라이버시
 
-트랜스크립트에는 소스 코드, 파일 경로 등 세션의 모든 것이 담길 수 있습니다.
-harnessay는 아무것도 업로드하지 않습니다: 파싱과 리포트 생성은 전부 로컬이고,
-생성된 `report.html`은 로컬에 남는 정적 파일입니다. 유일한 네트워크 활동은 회귀
-하네스가 본인의 `claude` CLI를 호출하는 것뿐입니다.
+트랜스크립트에는 소스 코드, 명령어, 프로젝트 구조가 담길 수 있습니다.
+harnessay는 전부 로컬에서 파싱하고 정적 `report.html`을 만듭니다. 텔레메트리
+없음, 업로드 없음. 유일한 네트워크 활동은 회귀 하네스가 본인의 `claude` CLI를
+호출하는 것뿐입니다.
 
 ## 한계
 
-- **비공식 포맷.** 트랜스크립트 스키마는 공개 API가 아니며 Claude Code 릴리스에
-  따라 바뀔 수 있습니다. 파싱은 `parse_session()`에 격리돼 있고
-  `SCHEMA_VERSION`이 찍혀 있어, 포맷이 깨져도 함수 하나만 고치면 됩니다.
-- **추정 토큰.** 툴 결과 크기는 바이트로 측정하며, `~tokens` 열은 토크나이저가
-  아닌 bytes/4 근사입니다.
-- **헤비 유저용.** 인사이트는 사용량에 비례합니다. 일주일에 세션 몇 개 수준이면
-  리포트가 빈약할 겁니다.
+- **비공식 포맷.** 트랜스크립트 스키마는 공개 API가 아닙니다. 파싱은
+  `parse_session()`에 격리돼 있고 `SCHEMA_VERSION`이 찍혀 있어, Claude Code
+  업데이트로 깨져도 함수 하나만 고치면 됩니다.
+- **추정 토큰.** `~tokens`는 토크나이저가 아닌 bytes/4 근사입니다.
+- **헤비 유저용.** 인사이트는 사용량에 비례합니다. 세션 몇 개로는 리포트가
+  빈약합니다.
 
 ## 개발
 
@@ -132,10 +136,9 @@ harnessay는 아무것도 업로드하지 않습니다: 파싱과 리포트 생�
 python3 skills/harnessay/test_harnessay.py   # self-check, 픽스처 없음
 ```
 
-구조: `skills/harnessay/`에 전부 들어 있습니다 — `SKILL.md`(Claude Code 진입점),
+전부 `skills/harnessay/`에 있습니다: `SKILL.md`(Claude Code 진입점),
 `harnessay.py`(파서 + 집계 + 리포트), `evalrun.py`(회귀 러너),
-`eval/tasks.json`(골든 태스크). 파싱 계층과 집계 계층은 의도적으로 분리돼
-있으며, 포맷 변경은 `parse_session()`만 건드려야 합니다.
+`eval/tasks.json`(골든 태스크). 파싱과 집계는 의도적으로 분리된 계층입니다.
 
 ## 라이선스
 
