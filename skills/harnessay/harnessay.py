@@ -24,10 +24,11 @@ def _content_size(content):
     return 0
 
 
-def parse_session(path):
+def parse_session(path, since=None):
     """jsonl 한 파일 → 정규화된 이벤트 리스트.
 
     이벤트: {"kind": "usage"|"tool_use"|"tool_result"|"compact", ...}
+    since: "YYYY-MM-DD" — ISO 타임스탬프라 문자열 비교로 충분.
     """
     events = []
     tool_names = {}  # tool_use_id -> name (결과 귀속용)
@@ -35,6 +36,8 @@ def parse_session(path):
         try:
             o = json.loads(line)
         except json.JSONDecodeError:
+            continue
+        if since and (o.get("timestamp") or "9999") < since:
             continue
         t = o.get("type")
         if t == "assistant":
@@ -76,9 +79,10 @@ def parse_session(path):
 
 # ---------- 집계 계층 ----------
 
-def aggregate(projects_dir):
+def aggregate(projects_dir, since=None):
     """{project: [events]} → 리포트용 stats dict."""
     st = {
+        "since": since,
         "projects": defaultdict(lambda: Counter()),  # project -> counters
         "tools": defaultdict(lambda: Counter()),     # tool -> {calls, bytes}
         "reads": Counter(),                          # (project, file) -> count
@@ -93,7 +97,7 @@ def aggregate(projects_dir):
         p["sessions"] += 1
         seq = []
         st["seqs"].append((project, seq))
-        for e in parse_session(f):
+        for e in parse_session(f, since):
             k = e["kind"]
             if k == "usage":
                 bucket = "sidechain_output" if e["sidechain"] else "output"
@@ -120,6 +124,11 @@ def aggregate(projects_dir):
     return st
 
 
+# 일반 코딩 동작 — 이것만으로 이뤄진 시퀀스는 스킬감이 아니라 코딩 그 자체
+GENERIC = {"Read", "Edit", "Write", "Grep", "Glob", "TodoWrite",
+           "Bash:cd", "Bash:ls", "Bash:cat", "Bash:echo", "Bash:mkdir"}
+
+
 def skill_candidates(seqs, min_count=3, top=20):
     """반복 툴 시퀀스 n-gram → 스킬 후보. 3개 이상 프로젝트 공통이면 personal.
 
@@ -134,14 +143,20 @@ def skill_candidates(seqs, min_count=3, top=20):
                     continue  # 같은 툴 연타는 스킬 후보가 아님
                 count[g] += 1
                 projects[g].add(project)
-    out = []
-    for g, c in count.most_common():
-        if c < min_count:
-            break
-        scope = "personal" if len(projects[g]) >= 3 else "project"
-        out.append({"gram": g, "count": c, "projects": sorted(projects[g]),
-                    "scope": scope})
-    return out[:top]
+    kept = [g for g, c in count.most_common()
+            if c >= min_count and not all(t in GENERIC for t in g)]
+
+    def sub(a, b):  # a가 b의 연속 부분열인가
+        return len(a) < len(b) and any(
+            b[i:i + len(a)] == a for i in range(len(b) - len(a) + 1))
+
+    # 짧은 gram이 항상 긴 gram 안에서만 등장(count 동일)하면 긴 쪽만 남긴다
+    # ponytail: O(n²) 비교, 후보 수십 개 수준이라 충분
+    kept = [g for g in kept
+            if not any(sub(g, h) and count[g] == count[h] for h in kept)]
+    return [{"gram": g, "count": count[g], "projects": sorted(projects[g]),
+             "scope": "personal" if len(projects[g]) >= 3 else "project"}
+            for g in kept[:top]]
 
 
 def headline(st):
@@ -196,7 +211,8 @@ def render(st):
 <style>body{{font:14px/1.5 -apple-system,sans-serif;max-width:960px;margin:2em auto;padding:0 1em}}
 table{{border-collapse:collapse;width:100%;margin:1em 0}}td,th{{border:1px solid #ddd;padding:4px 8px;text-align:left}}
 th{{background:#f5f5f5}}h2{{margin-top:2em}}.hl{{background:#fffbe6;padding:.8em 1em;border:1px solid #eed}}</style>
-<h1>Context Budget Report <small>(schema {SCHEMA_VERSION})</small></h1>
+<h1>Context Budget Report <small>(schema {SCHEMA_VERSION}{
+        ", since " + e(st["since"]) if st.get("since") else ""})</small></h1>
 <p class="hl"><b>{e(headline(st))}</b></p>
 <p>output {fmt(T['output'])} tok (sidechain {fmt(T['sidechain_output'])}) ·
 cache write {fmt(T['cache_creation'])} · cache read {fmt(T['cache_read'])} ·
@@ -218,8 +234,9 @@ def main():
     ap.add_argument("projects_dir", nargs="?",
                     default=os.path.expanduser("~/.claude/projects"))
     ap.add_argument("-o", "--out", default="report.html")
+    ap.add_argument("--since", help="이 날짜(YYYY-MM-DD) 이후 라인만 집계")
     args = ap.parse_args()
-    st = aggregate(args.projects_dir)
+    st = aggregate(args.projects_dir, args.since)
     with open(args.out, "w", encoding="utf-8") as f:
         f.write(render(st))
     print(headline(st))

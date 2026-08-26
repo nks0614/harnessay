@@ -14,6 +14,8 @@ for this skill" — referred to as `$SKILL_DIR` below). Python 3.8+, stdlib only
    ```bash
    python3 "$SKILL_DIR/harnessay.py" -o <scratchpad>/report.html
    ```
+   If the user asks about a specific period ("this month", "since the fix"),
+   add `--since YYYY-MM-DD`.
 2. Relay the stdout headline sentence to the user.
 3. Send report.html to the user (if headless, just give the path).
 4. Summarize the top 5 rows of the report's "Skill candidates" section with

@@ -58,6 +58,21 @@ def main():
         assert top["gram"] == ("Edit", "Bash:git") and top["scope"] == "personal", top
         assert all(c["count"] >= 3 for c in cands)
         assert skill_candidates([("a", ["Read", "Read", "Read"])]) == []  # 연타 제외
+        # 포함관계 접기: (Bash:git, Edit)은 항상 긴 gram 안에서만 등장 → 제거
+        grams = [c["gram"] for c in cands]
+        assert ("Bash:git", "Edit") not in grams, grams
+        # 범용 툴로만 이뤄진 시퀀스는 후보 아님
+        assert skill_candidates([("a", ["Read", "Edit", "Read", "Edit"])] * 3) == []
+
+        # --since: 날짜 이전 라인 제외
+        with open(os.path.join(d, "proj-a", "s2.jsonl"), "w") as f:
+            for ts, tok in (("2026-01-01T00:00:00Z", 100), ("2026-06-01T00:00:00Z", 1)):
+                f.write(line({"type": "assistant", "timestamp": ts, "message": {
+                    "usage": {"output_tokens": tok, "cache_creation_input_tokens": 0,
+                              "cache_read_input_tokens": 0}, "content": []}}))
+        # s2의 1월 라인(100)만 걸러지고, timestamp 없는 s1 라인(23)은 포함
+        st2 = aggregate(d, since="2026-03-01")
+        assert st2["totals"]["output"] == 24, st2["totals"]
     print("ok")
 
 
