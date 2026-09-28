@@ -139,10 +139,11 @@ Scope it with `--since YYYY-MM-DD` to re-measure after changing a habit.
 ### Promote — skill candidates
 
 Sequences repeated 3+ times are suggested as candidates: shared across 3+
-projects → **personal** skill (`~/.claude/skills`), confined to one project →
+projects → **personal** skill (`~/.claude/skills`), fewer than three projects →
 **project** skill (`.claude/skills`). Codex equivalents are `~/.agents/skills`
 and `.agents/skills`. harnessay never generates skills — it
-presents evidence, you decide.
+presents evidence, you decide. Counts are occurrences, not distinct sessions;
+a candidate can come from repetition within a single session.
 
 ### Verify — skill regression harness
 
@@ -176,18 +177,36 @@ connectivity only; it does not prove that a skill was invoked.
 
 Each task consumes account usage — keep suites small (1–2 per skill).
 Checks are output-based (`contains`/`regex`); repository-state and test-exit
-checks are on the roadmap, so treat a PASS as "the skill ran and answered
-correctly", not "the repo is guaranteed intact".
+checks are on the roadmap. A PASS means the CLI completed successfully and
+its response matched the configured pattern. It does not prove that a skill
+was invoked, its work was correct, or the repository remained intact.
 
 ## How is this different?
 
-Usage trackers (ccusage, `/usage`) tell you **how much** you spent. Trace
-viewers let you inspect **one run**. Skill generators write skills **for**
-you. harnessay covers the loop between them: observe your accumulated
-history, find what's wasted and repeated, promote it into reusable
-instructions, and measure whether that actually helped. Its cross-project
-view is the differentiator — patterns that only show up when you run several
-repos are invisible to single-session tools.
+harnessay focuses on accumulated local history: identify large outputs and
+repeated sequences across projects, trace findings to source records, and
+compare reports after a change. Skill promotion remains manual. These
+features help investigate improvements; they do not establish an advantage
+over other tools or guarantee savings.
+
+## Live evaluation findings
+
+A pilot used the same model and source snapshot for five tasks, with two
+runs per condition: 20 calls comparing existing instructions against added
+efficiency guidance. Four separate calls reran the offline-check task in a
+writable environment. Some tasks became faster, but consistent time or token
+savings were not established.
+
+The original trial included temporary-file failures. Some runs with correct
+final answers also encountered those failures, so their timing is not free
+of environment effects. The guidance was manually written; this pilot does
+not prove an automatic or unique harnessay benefit.
+
+See the [full benchmark](docs/BENCHMARK.ko.md),
+[environment correction](docs/BENCHMARK-correction.ko.md), and
+[improvement investigation](docs/IMPROVEMENTS.ko.md) (Korean).
+The optional runner and protocol are in [experiments/](experiments/README.md);
+live runs consume account usage. Raw local logs are excluded from Git.
 
 ## Privacy
 
@@ -203,6 +222,9 @@ harness invoking your own `claude` or `codex` CLI.
   `SCHEMA_VERSION`. New schemas may require adapter changes.
 - **Estimated tokens.** `~tokens` is a UTF-8 bytes/4 approximation, not a
   tokenizer or billing estimate. Non-text payloads are excluded.
+- **Usage coverage.** The report retains recorded output and cache counts,
+  but currently omits input tokens and Codex reasoning-token breakdowns.
+  It is not a complete usage or billing ledger.
 - **Codex coverage.** Active `sessions/` rollouts are included; archived or
   cloud-only chats are not automatically included. Shell commands are not
   reconstructed as file reads, and generic `exec` wrappers remain opaque.
@@ -217,9 +239,10 @@ harness invoking your own `claude` or `codex` CLI.
 python3 skills/harnessay/test_harnessay.py   # synthetic transcript checks
 python3 skills/harnessay/test_evalrun.py     # offline CLI mocks, no account usage
 python3 skills/harnessay/test_report_data.py # export/comparison checks
+python3 experiments/test_benchmark.py       # offline recorder/grader checks
 ```
 
-Everything lives in `skills/harnessay/`: `SKILL.md` (shared Claude Code / Codex entry
+Core code lives in `skills/harnessay/`: `SKILL.md` (shared Claude Code / Codex entry
 point), `harnessay.py` (parser + aggregation + report), `evalrun.py`
 (regression runner), `report_data.py` (JSON export and comparison), `eval/tasks.json` (golden tasks). Parsing and
 aggregation are deliberately separate layers.
