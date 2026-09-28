@@ -3,5 +3,7 @@ __pycache__/
 .venv/
 .DS_Store
 report*.html
+report*.json
 results.jsonl
 docs/idea.md
+benchmark-runs/

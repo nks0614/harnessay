@@ -1,0 +1,9 @@
+[
+  {
+    "id": "codex-sanity-echo",
+    "skill": null,
+    "provider": "codex",
+    "prompt": "Reply with exactly PONG and nothing else.",
+    "check": { "type": "regex", "value": "^PONG\\s*$" }
+  }
+]

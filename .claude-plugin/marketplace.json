@@ -5,7 +5,7 @@
     {
       "name": "harnessay",
       "source": "./",
-      "description": "Profile your Claude Code transcripts: context budget report, skill-promotion candidates, and a skill regression test harness."
+      "description": "Profile Claude Code and Codex transcripts: context budget reports, before/after comparisons, source evidence, and skill regression tests."
     }
   ]
 }
