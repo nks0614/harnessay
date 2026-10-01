@@ -46,12 +46,14 @@ def inspect_run(text):
         if event.get('type') == 'item.completed' and item.get('type') == 'command_execution':
             commands.append({'command': item.get('command', ''), 'exit_code': item.get('exit_code'),
                              'output': item.get('aggregated_output', '')})
-        if event.get('type') == 'turn.completed' and isinstance(event.get('usage'), dict):
-            usages.append(event['usage'])
+        if event.get('type') == 'turn.completed':
+            usages.append(event['usage'] if isinstance(event.get('usage'), dict) else {})
     usage = None
     if usages:
-        usage = {key: sum(row[key] for row in usages) if all(type(row.get(key)) is int for row in usages) else None
-                 for key in ('input_tokens', 'cached_input_tokens', 'output_tokens')}
+        usage = {key: sum(row[key] for row in usages)
+                 if all(type(row.get(key)) is int and row[key] >= 0 for row in usages) else None
+                 for key in ('input_tokens', 'cached_input_tokens', 'output_tokens',
+                             'reasoning_output_tokens', 'cache_write_input_tokens')}
     return {'usage': usage, 'commands': commands,
             'tool_output_bytes': sum(len(row['output'].encode()) for row in commands)}
 

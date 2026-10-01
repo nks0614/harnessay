@@ -15,7 +15,7 @@ import tempfile
 from collections import Counter, defaultdict
 from pathlib import Path
 
-from report_data import export_stats, compare_reports
+from report_data import export_stats, compare_reports, USAGE_FIELDS, usage_value
 
 SCHEMA_VERSION = "2026-09-claude-codex"
 
@@ -44,6 +44,36 @@ def _tokens(usage):
     if any(type(v) is not int or v < 0 for v in values.values()):
         raise ValueError("invalid token count")
     return values
+
+
+def _usage_metrics(u, provider):
+    """Normalize provider counters without treating an omitted component as zero."""
+    values = {"output_tokens": u.get("output_tokens")}
+    if provider == "claude":
+        fresh, written, cached = (u.get(k) for k in
+                                 ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"))
+        values.update(fresh_input_tokens=fresh, cached_input_tokens=cached, cache_write_input_tokens=written)
+        if fresh is not None and written is not None:
+            values["uncached_input_tokens"] = fresh + written
+            if cached is not None:
+                values["input_tokens"] = fresh + written + cached
+    else:
+        values.update({key: u.get(key) for key in USAGE_FIELDS
+                       if key not in {"uncached_input_tokens", "fresh_input_tokens"}})
+        total, cached = u.get("input_tokens"), u.get("cached_input_tokens")
+        if total is not None and cached is not None:
+            if cached > total:
+                raise ValueError("cached input exceeds total input")
+            values["uncached_input_tokens"] = total - cached
+            written = u.get("cache_write_input_tokens")
+            if written is not None:
+                if written > total - cached:
+                    raise ValueError("cache write exceeds uncached input")
+                values["fresh_input_tokens"] = total - cached - written
+        if (u.get("reasoning_output_tokens") is not None and u.get("output_tokens") is not None
+                and u["reasoning_output_tokens"] > u["output_tokens"]):
+            raise ValueError("reasoning output exceeds total output")
+    return {key: value for key, value in values.items() if value is not None}
 
 
 def _content_text(content):
@@ -113,7 +143,7 @@ def parse_session(path, since=None, until=None, diagnostics=None):
                 u = _tokens(m.get("usage", {}))
                 mid = _text(m.get("id"))
                 sidechain = bool(o.get("isSidechain")) or "subagents" in str(path).split(os.sep)
-                usage = _event(o, "usage", sidechain=sidechain,
+                usage = _event(o, "usage", sidechain=sidechain, metrics=_usage_metrics(u, "claude"),
                                output=u.get("output_tokens", 0),
                                cache_creation=u.get("cache_creation_input_tokens", 0),
                                cache_read=u.get("cache_read_input_tokens", 0))
@@ -191,6 +221,7 @@ def parse_codex_session(path, since=None, until=None, diagnostics=None, owner=No
     boundary = boundary if type(boundary) is int and boundary > 0 else 0
     events, tool_names, previous, seen_usage = [], {}, {}, set()
     has_usage_records, copied_meta = False, False
+    previous_fields, has_cumulative = set(), False
     for o in _records(path, diagnostics):
         batch = []
         try:
@@ -234,7 +265,13 @@ def parse_codex_session(path, since=None, until=None, diagnostics=None, owner=No
                          for key, value in total.items()}
                     previous = total
                     identity = None  # cumulative counters have no stable response identity
-                batch.append(_event(o, "usage", id=identity, sidechain=sidechain,
+                if t != "token_usage_record":
+                    # A reappearing counter spans an unknown gap, possibly outside the requested dates.
+                    u = {key: value for key, value in u.items()
+                         if not has_cumulative or key in previous_fields}
+                    previous_fields, has_cumulative = set(total), True
+                metrics = _usage_metrics(u, "codex")
+                batch.append(_event(o, "usage", id=identity, sidechain=sidechain, metrics=metrics,
                                     output=u.get("output_tokens", 0),
                                     cache_creation=u.get("cache_write_input_tokens", 0),
                                     cache_read=u.get("cached_input_tokens", 0)))
@@ -294,6 +331,7 @@ def aggregate(projects_dir=None, since=None, source="claude", codex_dir=None, un
         "reads": Counter(),                          # (project, file) -> Read 횟수
         "redundant": Counter(),                      # (project, file) -> 동일 내용 재읽기 bytes
         "totals": Counter(),
+        "usage": {"records": 0, "fields": {key: {"tokens": 0, "records": 0} for key in USAGE_FIELDS}},
         "seqs": [],                                  # (project, [tool token,...]) 세션별
     }
     if source not in ("claude", "codex", "all"):
@@ -353,6 +391,10 @@ def aggregate(projects_dir=None, since=None, source="claude", codex_dir=None, un
         for e in events:
             k = e["kind"]
             if k == "usage":
+                st["usage"]["records"] += 1
+                for key, value in e["metrics"].items():
+                    st["usage"]["fields"][key]["tokens"] += value
+                    st["usage"]["fields"][key]["records"] += 1
                 bucket = "sidechain_output" if e["sidechain"] else "output"
                 p[bucket] += e["output"]
                 st["totals"][bucket] += e["output"]
@@ -414,8 +456,8 @@ def skill_candidates(seqs, min_count=3, top=20):
 
     자동 생성 안 함 — 증거만 제시하고 승격은 사람이 결정한다.
     """
-    count, projects = Counter(), defaultdict(set)
-    for project, seq in seqs:
+    count, projects, sessions = Counter(), defaultdict(set), defaultdict(set)
+    for session, (project, seq) in enumerate(seqs):
         for n in (2, 3, 4):
             for i in range(len(seq) - n + 1):
                 g = tuple(seq[i:i + n])
@@ -423,6 +465,7 @@ def skill_candidates(seqs, min_count=3, top=20):
                     continue  # 같은 툴 연타는 스킬 후보가 아님
                 count[g] += 1
                 projects[g].add(project)
+                sessions[g].add(session)
     kept = [g for g, c in count.most_common()
             if c >= min_count and not all(t in GENERIC for t in g)]
 
@@ -434,7 +477,8 @@ def skill_candidates(seqs, min_count=3, top=20):
     # ponytail: O(n²) 비교, 후보 수십 개 수준이라 충분
     kept = [g for g in kept
             if not any(sub(g, h) and count[g] == count[h] for h in kept)]
-    return [{"gram": g, "count": count[g], "projects": sorted(projects[g]),
+    return [{"gram": g, "count": count[g], "sessions": len(sessions[g]),
+             "single_session": len(sessions[g]) == 1, "projects": sorted(projects[g]),
              "scope": "personal" if len(projects[g]) >= 3 else "project"}
             for g in kept[:top]]
 
@@ -492,7 +536,8 @@ def render(st, comparison=None):
         for (proj, fp), n in st["reads"].most_common(15) if n >= 5)
     rows_c = "".join(
         f"<tr><td><code>{e(' → '.join(c['gram']))}</code></td><td>{c['count']}</td>"
-        f"<td>{len(c['projects'])}</td><td>{c['scope']}</td>"
+        f"<td>{c.get('sessions', 'n/a')}</td><td>{len(c['projects'])}</td>"
+        f"<td>{'Review single-session repetition' if c.get('single_session') else c['scope']}</td>"
         f"<td>{'<br>'.join(_source_link(x['source']) for x in c.get('examples', []))}</td></tr>"
         for c in st.get("evidence", {}).get("candidates", skill_candidates(st["seqs"])))
     diagnostics = " · ".join(f"{e(key)}: {value}" for key, value in sorted(st.get("diagnostics", {}).items()))
@@ -502,6 +547,15 @@ def render(st, comparison=None):
     rows_repeat = "".join(
         f"<tr><td>{e(row['file'])}</td><td>{fmt(row['bytes'])}</td>"
         f"<td>{_source_link(row['source'])}</td></tr>" for row in st.get("evidence", {}).get("redundant_reads", []))
+    usage = st.get("usage", {})
+    rows_usage = ""
+    for key in USAGE_FIELDS:
+        field = usage.get("fields", {}).get(key, {})
+        known = field.get("records", 0)
+        total = usage_value(usage, key)
+        rows_usage += (f"<tr><td>{key}</td><td>{fmt(total) if total is not None else 'n/a'}</td>"
+                       f"<td>{fmt(field['tokens']) if known else 'n/a'}</td>"
+                       f"<td>{known}/{usage.get('records', 0)}</td></tr>")
     comparison_html = ""
     if comparison:
         def number(value):
@@ -528,10 +582,17 @@ th{{background:#f5f5f5}}h2{{margin-top:2em}}.hl{{background:#fffbe6;padding:.8em
         ", since " + e(st["since"]) if st.get("since") else ""}{
         ", until (exclusive) " + e(st["until"]) if st.get("until") else ""})</small></h1>
 <p class="hl"><b>{e(headline(st))}</b></p>
-<p>output {fmt(T['output'])} tok (sidechain {fmt(T['sidechain_output'])}) ·
+<p>observed output {fmt(T['output'])} tok (sidechain {fmt(T['sidechain_output'])}) ·
 cache write {fmt(T['cache_creation'])} · cache read {fmt(T['cache_read'])} ·
 tool results {fmt(T['result_bytes'])} B · {T['compactions']} compactions</p>
 {comparison_html}
+<h2>Recorded token usage</h2>
+<p>Input includes cached reads and cache writes; uncached input excludes cached reads;
+fresh input excludes both cached reads and writes. Claude's raw input is fresh input.
+Cache and reasoning counts are breakdowns, not extra tokens to add to input or output.
+Complete totals require the field in every retained usage record. Missing or partial totals are n/a;
+observed subtotals may omit usage. Coverage describes parsed records, not all account activity.</p>
+<table><tr><th>metric</th><th>complete total</th><th>observed subtotal</th><th>records with value / usage records</th></tr>{rows_usage}</table>
 <h2>Input diagnostics</h2>
 <p>{diagnostics or 'No diagnostics available.'}</p>
 <p>Invalid or unsupported records indicate incomplete coverage. Bounded reports exclude undated records.
@@ -558,10 +619,12 @@ CLAUDE.md (Claude) or AGENTS.md (Codex) may reduce repeated reading.</p>
 <h2>Skill candidates (repeated tool sequences)</h2>
 <p>Sequences repeated 3+ times. Shared across 3+ projects → <code>personal</code>
 (Claude: ~/.claude/skills; Codex: ~/.agents/skills), otherwise <code>project</code>
-(Claude: .claude/skills; Codex: .agents/skills). Promotion is manual.</p>
+(Claude: .claude/skills; Codex: .agents/skills). Single-session repetition is marked for review,
+not skill promotion. Sessions count contributing transcript contexts, not unique tasks or users.
+Promotion is manual.</p>
 <p>Tool result sizes are UTF-8 text bytes; ~tokens is only bytes/4, not billed tokens.
 Codex projects are prefixed with codex:. Generic exec wrappers remain opaque tool calls.</p>
-<table><tr><th>sequence</th><th>count</th><th>projects</th><th>suggestion</th><th>examples</th></tr>{rows_c}</table>"""
+<table><tr><th>sequence</th><th>count</th><th>sessions</th><th>projects</th><th>suggestion</th><th>examples</th></tr>{rows_c}</table>"""
 
 
 def main():

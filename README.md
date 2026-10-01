@@ -101,6 +101,25 @@ duplicates. Known fork prefixes are excluded only when parent metadata confirms
 the boundary. Stable tool/response IDs are deduplicated within related Codex
 sessions before applying date filters; independent sessions are preserved.
 
+## Recorded token usage
+
+The report and JSON snapshots retain total input, uncached input, fresh input,
+cache reads/writes, output and available reasoning output. For Claude, total
+input is raw input plus cache creation and cache reads; raw input is shown as
+fresh input. For Codex, input already includes the cache breakdown. Uncached
+input excludes cache reads; fresh input also excludes cache writes. Reasoning
+is a breakdown of output and is never added a second time. These definitions
+follow the [Claude usage fields](https://platform.claude.com/docs/en/build-with-claude/prompt-caching)
+and [OpenAI usage breakdown](https://github.com/openai/openai-node/blob/main/src/resources/responses/responses.ts).
+
+Each field shows an observed subtotal and the number of usage records with a
+value. A complete total requires coverage of every retained usage record;
+otherwise it and its comparison changes are `n/a`. Explicit zero stays zero.
+A counter that reappears after a gap in cumulative records is not attributed
+to a single interval. Old JSON snapshots remain readable; fields they did not
+record remain unavailable. Live experiment recording also retains reasoning
+and cache-write fields when supplied.
+
 ## The loop
 
 harnessay is one optimization loop over your own usage history, not three
@@ -142,8 +161,10 @@ Sequences repeated 3+ times are suggested as candidates: shared across 3+
 projects → **personal** skill (`~/.claude/skills`), fewer than three projects →
 **project** skill (`.claude/skills`). Codex equivalents are `~/.agents/skills`
 and `.agents/skills`. harnessay never generates skills — it
-presents evidence, you decide. Counts are occurrences, not distinct sessions;
-a candidate can come from repetition within a single session.
+presents evidence, you decide. Each candidate shows both occurrences and
+contributing session contexts. A pattern confined to one context is marked
+for repetition review rather than skill promotion. Contexts mean parsed
+transcript sequences, not independent tasks or users.
 
 ### Verify — skill regression harness
 
@@ -222,9 +243,11 @@ harness invoking your own `claude` or `codex` CLI.
   `SCHEMA_VERSION`. New schemas may require adapter changes.
 - **Estimated tokens.** `~tokens` is a UTF-8 bytes/4 approximation, not a
   tokenizer or billing estimate. Non-text payloads are excluded.
-- **Usage coverage.** The report retains recorded output and cache counts,
-  but currently omits input tokens and Codex reasoning-token breakdowns.
-  It is not a complete usage or billing ledger.
+- **Usage coverage.** Recorded input, cache, output and available reasoning
+  counters are retained with per-field coverage. Missing values are not zero;
+  partial subtotals are shown separately and cannot produce comparison deltas.
+  Coverage is over retained usage records, not all account activity. Invalid or
+  unsupported records can still leave gaps; this is not a billing ledger.
 - **Codex coverage.** Active `sessions/` rollouts are included; archived or
   cloud-only chats are not automatically included. Shell commands are not
   reconstructed as file reads, and generic `exec` wrappers remain opaque.

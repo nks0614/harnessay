@@ -1,6 +1,6 @@
 {
   "name": "harnessay",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Profile Claude Code and Codex transcripts: context budget reports, before/after comparisons, source evidence, and skill regression tests. Local-only, stdlib-only.",
   "author": { "name": "nks0614" }
 }

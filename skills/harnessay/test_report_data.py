@@ -8,7 +8,46 @@ from pathlib import Path
 from report_data import export_stats, compare_reports
 
 
+def coverage_checks():
+    old = export_stats({})
+    current = deepcopy(old)
+    current['usage'] = {'records': 2, 'fields': {
+        key: {'tokens': 0, 'records': 2} for key in (
+            'input_tokens', 'uncached_input_tokens', 'fresh_input_tokens', 'cached_input_tokens',
+            'cache_write_input_tokens', 'output_tokens', 'reasoning_output_tokens')}}
+    metrics = {r['metric']: r for r in compare_reports(current, old)['metrics']}
+    assert metrics['input_tokens']['before'] is None
+    assert metrics['input_tokens']['after'] == 0
+    assert metrics['input_tokens']['delta'] is None
+    partial = deepcopy(current)
+    partial['usage']['fields']['input_tokens'] = {'tokens': 100, 'records': 1}
+    comparison = compare_reports(partial, current)
+    row = next(r for r in comparison['metrics'] if r['metric'] == 'input_tokens')
+    assert row['after'] is None and row['percent_change'] is None
+    assert any('partial token coverage' in warning for warning in comparison['warnings'])
+    for bad in (None, True, -1, 3, 1.5, '1'):
+        invalid = deepcopy(current)
+        invalid['usage']['fields']['input_tokens']['records'] = bad
+        try:
+            compare_reports(invalid, current)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError('invalid field coverage accepted')
+    for field in ({'tokens': 5, 'records': 0}, {'tokens': -1, 'records': 1},
+                  {'tokens': True, 'records': 1}, {'tokens': None, 'records': 1}):
+        invalid = deepcopy(current)
+        invalid['usage']['fields']['input_tokens'] = field
+        try:
+            compare_reports(invalid, current)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError('invalid observed tokens accepted')
+
+
 def main():
+    coverage_checks()
     evidence = {"large_results": [{"project": "한글", "tool": "Read", "bytes": 100,
                 "source": {"path": "/기록/세션.jsonl", "line": 2, "timestamp": "2026-09-01T00:00:00Z"}}],
                 "redundant_reads": [], "candidates": []}

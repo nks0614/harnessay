@@ -8,6 +8,110 @@ import sys
 from pathlib import Path
 
 from harnessay import aggregate, headline, render, skill_candidates
+from report_data import export_stats, compare_reports
+
+
+def usage_coverage_checks():
+    # Missing tokens must not masquerade as zero; caches and reasoning are subsets.
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        codex, claude = root / 'codex', root / 'claude'
+        codex.mkdir()
+        (claude / 'project').mkdir(parents=True)
+        def record(kind, payload, day='2026-10-01'):
+            return {'type': kind, 'timestamp': day, 'payload': payload}
+        def modern(rid, **usage):
+            return record('token_usage_record', {'response_id': rid, 'usage': usage})
+        meta = record('session_meta', {'id': 'parent', 'cwd': '/example'})
+        one = modern('one', input_tokens=100, cached_input_tokens=40,
+                     cache_write_input_tokens=0, output_tokens=20, reasoning_output_tokens=5)
+        two = modern('two', cached_input_tokens=0, output_tokens=0, reasoning_output_tokens=0)
+        path = codex / 'parent.jsonl'
+        path.write_text(''.join(line(r) for r in (meta, one, one, two)))
+        st = aggregate(source='codex', codex_dir=str(codex))
+        assert 'usage' in st, 'recorded input and reasoning usage is discarded'
+        assert st['usage']['records'] == 2
+        fields = st['usage']['fields']
+        assert fields['input_tokens'] == {'tokens': 100, 'records': 1}
+        assert fields['uncached_input_tokens'] == {'tokens': 60, 'records': 1}
+        assert fields['reasoning_output_tokens'] == {'tokens': 5, 'records': 2}
+        snap = export_stats(st)
+        metrics = {r['metric']: r for r in compare_reports(snap, snap)['metrics']}
+        assert metrics['input_tokens']['before'] is None
+        assert metrics['output_tokens']['before'] == 20
+        assert 'Recorded token usage' in render(st) and '1/2' in render(st)
+
+        two['payload']['usage']['input_tokens'] = 0
+        path.write_text(''.join(line(r) for r in (meta, one, two)))
+        # A copied response in a fork must not count a second time.
+        child = record('session_meta', {'id': 'child', 'cwd': '/example', 'forked_from_id': 'parent'})
+        (codex / 'child.jsonl').write_text(line(child) + line(one))
+        complete = export_stats(aggregate(source='codex', codex_dir=str(codex)))
+        metrics = {r['metric']: r for r in compare_reports(complete, complete)['metrics']}
+        assert metrics['input_tokens']['before'] == 100
+        assert metrics['uncached_input_tokens']['before'] == 60
+        assert complete['usage']['records'] == 2
+        for invalid in (modern('bad-cache', input_tokens=10, cached_input_tokens=11),
+                        modern('bad-write', input_tokens=10, cached_input_tokens=5, cache_write_input_tokens=6),
+                        modern('bad-reasoning', output_tokens=10, reasoning_output_tokens=11)):
+            with path.open('a') as stream:
+                stream.write(line(invalid))
+        checked = aggregate(source='codex', codex_dir=str(codex))
+        assert checked['usage']['records'] == 2 and checked['diagnostics']['invalid_records'] == 3
+        path.write_text(''.join(line(r) for r in (meta, one, two)))
+
+        msg = {'type': 'assistant', 'timestamp': '2026-10-01', 'message': {
+            'id': 'claude-one', 'content': [], 'usage': {'input_tokens': 20,
+            'cache_creation_input_tokens': 10, 'cache_read_input_tokens': 70, 'output_tokens': 4}}}
+        (claude / 'project' / 's.jsonl').write_text(line(msg) + line(msg))
+        both = aggregate(str(claude), source='all', codex_dir=str(codex))
+        assert both['usage']['fields']['input_tokens'] == {'tokens': 200, 'records': 3}
+        assert both['usage']['fields']['uncached_input_tokens'] == {'tokens': 90, 'records': 3}
+        assert both['usage']['fields']['output_tokens']['tokens'] == 24
+        assert both['usage']['fields']['reasoning_output_tokens']['records'] == 2
+        del msg['message']['usage']['cache_creation_input_tokens']
+        (claude / 'project' / 's.jsonl').write_text(line(msg))
+        partial = aggregate(str(claude))
+        assert partial['usage']['fields']['input_tokens']['records'] == 0
+        assert partial['usage']['fields'].get('fresh_input_tokens') == {'tokens': 20, 'records': 1}
+
+        # Cumulative deltas need their preceding observation, including before the date bound.
+        def cumulative(values, day='2026-10-01'):
+            return record('event_msg', {'type': 'token_count', 'info': {'total_token_usage': values}}, day)
+        rows = [meta, cumulative({'input_tokens': 100, 'cached_input_tokens': 60,
+                                 'output_tokens': 10, 'reasoning_output_tokens': 3}, '2026-09-30'),
+                cumulative({'input_tokens': 200, 'cached_input_tokens': 120,
+                            'output_tokens': 20, 'reasoning_output_tokens': 6})]
+        (codex / 'child.jsonl').unlink()
+        path.write_text(''.join(map(line, rows)))
+        delta = aggregate(source='codex', codex_dir=str(codex), since='2026-10-01')
+        assert delta['usage']['fields']['input_tokens'] == {'tokens': 100, 'records': 1}
+        assert delta['usage']['fields']['reasoning_output_tokens']['tokens'] == 3
+        rows += [cumulative({'output_tokens': 30}), cumulative({'input_tokens': 400, 'output_tokens': 40})]
+        path.write_text(''.join(map(line, rows)))
+        gap = aggregate(source='codex', codex_dir=str(codex), since='2026-10-01')
+        assert gap['usage']['fields']['input_tokens'] == {'tokens': 100, 'records': 1}
+        rows = [meta, cumulative({'input_tokens': 100, 'cached_input_tokens': 80,
+                                 'output_tokens': 10, 'reasoning_output_tokens': 8}, '2026-09-30'),
+                cumulative({'input_tokens': 200, 'output_tokens': 20}),
+                cumulative({'input_tokens': 300, 'cached_input_tokens': 200,
+                            'output_tokens': 30, 'reasoning_output_tokens': 22})]
+        path.write_text(''.join(map(line, rows)))
+        resumed = aggregate(source='codex', codex_dir=str(codex), since='2026-10-01')
+        assert resumed['usage']['fields']['input_tokens'] == {'tokens': 200, 'records': 2}
+        assert resumed['usage']['fields']['output_tokens'] == {'tokens': 20, 'records': 2}
+        assert resumed['usage']['fields']['cached_input_tokens']['records'] == 0
+        assert resumed['diagnostics']['invalid_records'] == 0
+
+
+def candidate_session_checks():
+    gram = ('Bash:git', 'Bash:pytest')
+    single = skill_candidates([('project', list(gram) * 3)])
+    assert single[0].get('sessions') == 1, 'single-session repetition lacks coverage'
+    assert single[0]['single_session'] is True
+    multi = skill_candidates([('project', list(gram)) for _ in range(3)])
+    assert multi[0]['count'] == 3 and multi[0]['sessions'] == 3
+    assert multi[0]['single_session'] is False
 
 
 def cli_checks():
@@ -328,6 +432,8 @@ def main():
         assert st2["totals"]["output"] == 1, st2["totals"]
         assert st2["diagnostics"]["undated_excluded"] > 0
     compatibility_checks()
+    usage_coverage_checks()
+    candidate_session_checks()
     evidence_checks()
     cli_checks()
     print("ok")

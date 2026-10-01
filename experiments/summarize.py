@@ -15,8 +15,10 @@ def value(row, key):
         usage = row.get('usage') or {}
         a, b = usage.get('input_tokens'), usage.get('cached_input_tokens')
         return a - b if a is not None and b is not None else None
-    if key in ('input_tokens', 'cached_input_tokens', 'output_tokens'):
-        return (row.get('usage') or {}).get(key)
+    if key in ('input_tokens', 'cached_input_tokens', 'output_tokens',
+               'reasoning_output_tokens', 'cache_write_input_tokens'):
+        count = (row.get('usage') or {}).get(key)
+        return count if type(count) is int and count >= 0 else None
     return row.get(key)
 
 
@@ -62,12 +64,16 @@ def main():
     for label, key, op in [
         ('총 입력 토큰', 'input_tokens', sum), ('그중 캐시된 입력 토큰', 'cached_input_tokens', sum),
         ('캐시되지 않은 입력 토큰', 'uncached_input', sum), ('총 출력 토큰', 'output_tokens', sum),
+        ('그중 추론 출력 토큰', 'reasoning_output_tokens', sum),
+        ('캐시 쓰기 입력 토큰', 'cache_write_input_tokens', sum),
         ('실행 시간 중앙값(초)', 'duration_seconds', statistics.median),
         ('전체 실행 시간 합계(초)', 'duration_seconds', sum), ('셸 호출 수', 'tool_calls', sum),
         ('셸 출력 바이트', 'tool_output_bytes', sum)]:
         b, g = measure(base, key, op), measure(guided, key, op)
         lines.append(f'| {label} | {fmt(b)} | {fmt(g)} | {delta(b,g)} |')
     lines += ['', '캐시 토큰은 입력 토큰의 부분집합입니다. 입력에 다시 더하지 않았습니다. 비용으로 환산하지 않았습니다.',
+              '추론 출력은 출력 토큰의 부분집합이며 다시 더하지 않습니다. 캐시 쓰기 입력은 별도로 표시합니다.',
+              '선택 지표가 한 턴 또는 실행에서라도 누락되면 합계는 미수집입니다. 명시된 0과 구분합니다.',
               '', '## 작업별 결과', '',
               '각 조건의 두 실행 중앙값을 비교합니다. 음수 변화율은 감소를 뜻합니다.', '',
               '| 작업 | 통과 B/G | 입력 토큰 변화 | 비캐시 입력 변화 | 시간 변화 | 셸 출력 변화 |',
